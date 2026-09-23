@@ -1,1 +1,1 @@
-"""Explainable graph analytics pipeline for the Money Graph case."""
+"""Explainable graph analytics pipeline for the Qadam case."""

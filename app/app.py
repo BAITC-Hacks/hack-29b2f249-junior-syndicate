@@ -4,6 +4,8 @@ import os
 import sys
 import time
 
+from dotenv import dotenv_values
+
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -12,12 +14,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.auth import account_action, session_valid
-from src.pipeline import run
-from src.workspace import load_workspace, workspace_payload, node_dossier, ranked_nodes, simulation_payload
+from src.pipeline import run, explain_node
+from src.workspace import load_workspace, workspace_payload, node_dossier, ranked_nodes, simulation_payload, node_ai_context, explain_with_ai
 
 OUTPUT = Path(os.environ.get("MONEY_GRAPH_OUTPUT", str(ROOT / "output")))
 DATABASE = Path(os.environ.get("MONEY_GRAPH_ACCOUNTS", str(ROOT / ".streamlit/users.sqlite3")))
-st.set_page_config(page_title="MoneyGraph Intelligence · Junior Syndicate", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Qadam · Junior Syndicate", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
 header[data-testid="stHeader"],footer,[data-testid="stToolbar"]{display:none}
 .block-container{padding:0!important;max-width:100%!important}
@@ -63,12 +65,18 @@ if authenticated:
     except (ValueError, KeyError, OSError) as error:
         load_error = f"Не удалось прочитать результаты: {error}"
 
+settings = {**dotenv_values(ROOT / ".env"), **os.environ}
+api_key = (settings.get("OPENAI_API_KEY") or "").strip()
+ai_enabled = bool(api_key and (settings.get("QADAM_ALLOW_EXTERNAL_AI") or "").lower() == "true")
+
 workspace = components.declare_component("analyst_workspace", path=str(ROOT / "app/frontend"))
 event = workspace(payload=payload, authenticated=authenticated, email=email, google_enabled=google_enabled,
-                  error=load_error, response=st.session_state.get("response", {}), key="workspace", default=None)
+                  error=load_error, ai_enabled=authenticated and ai_enabled, response=st.session_state.get("response", {}), key="workspace", default=None)
 if isinstance(event, dict) and event.get("id") and event["id"] != st.session_state.get("handled_event"):
     st.session_state.handled_event = event["id"]
     response = {"id": event["id"], "action": event.get("action")}
+    if event.get("action") == "explain":
+        response["gid"] = str(event.get("gid", ""))
     try:
         action = event.get("action")
         if action in ("login", "register", "recover"):
@@ -96,6 +104,12 @@ if isinstance(event, dict) and event.get("id") and event["id"] != st.session_sta
             raise ValueError(load_error)
         elif action == "select":
             response["card"] = node_dossier(nodes, edges, str(event.get("gid", "")))
+        elif action == "explain":
+            if not ai_enabled:
+                raise ValueError("ИИ не подключён. Настройте локальный .env; исходное обоснование доступно.")
+            selected_card = explain_node(int(response["gid"]), features=nodes)
+            context = node_ai_context(selected_card, edges)
+            response["explanation"] = explain_with_ai(context, api_key, settings.get("OPENAI_MODEL") or "gpt-4o-mini")
         elif action == "query":
             cluster = event.get("cluster")
             selected = ranked_nodes(nodes, event.get("role") or None, int(cluster) if cluster not in (None, "") else None, str(event.get("query", "")))
@@ -111,7 +125,7 @@ if isinstance(event, dict) and event.get("id") and event["id"] != st.session_sta
             raise ValueError("Неизвестное действие.")
         if st.session_state.get("account"):
             st.session_state.account["last_seen"] = now
-    except (ValueError, KeyError, OSError, TypeError) as error:
+    except (ValueError, KeyError, OSError, TypeError, RuntimeError) as error:
         response["error"] = str(error)
     st.session_state.response = response
     st.rerun()

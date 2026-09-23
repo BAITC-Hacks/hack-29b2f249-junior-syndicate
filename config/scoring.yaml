@@ -1,0 +1,64 @@
+random_seed: 42
+community_resolution: 1.0
+betweenness_samples: 256
+betweenness_exact_limit: 1000
+top_n: 50
+roles:
+  consolidator:
+    fan_in: 0.40
+    incoming_volume: 0.25
+    pagerank: 0.15
+    retention: 0.10
+    upstream_diversity: 0.10
+  distributor:
+    fan_out: 0.45
+    outgoing_volume: 0.25
+    outgoing_count: 0.15
+    fan_out_ratio: 0.15
+  transit:
+    flow_similarity: 0.35
+    forwarded_48h: 0.30
+    volume: 0.15
+    middle: 0.10
+    betweenness: 0.10
+  terminal:
+    incoming_volume: 0.35
+    retention: 0.40
+    incoming_count: 0.25
+  coordinator:
+    betweenness: 0.40
+    bridge: 0.25
+    seed_reach: 0.15
+    pagerank: 0.10
+    volume: 0.10
+priority:
+  structural: 0.25
+  financial: 0.20
+  seed_relevance: 0.20
+  role_importance: 0.20
+  anomaly: 0.10
+  temporal: 0.05
+role_importance:
+  coordinator: 1.0
+  consolidator: 0.9
+  distributor: 0.85
+  transit: 0.7
+  terminal: 0.5
+  peripheral: 0.1
+thresholds:
+  min_specialized_degree: 3
+  strong_degree: 8
+  terminal_min_transactions: 2
+  terminal_min_retention: 0.8
+  coordinator_betweenness_percentile: 0.8
+  coordinator_min_degree: 3
+  flow_tolerance: 0.2
+  transit_min_ratio: 0.5
+  transit_max_ratio: 1.5
+  seed_transit_min_forwarding: 0.8
+  seed_flow_reliability: 0.25
+  boundary_quality: 0.75
+  seed_quality: 0.8
+  low_observation_quality: 0.8
+  confidence_margin_scale: 0.25
+  terminal_fan_in_discount: 0.5

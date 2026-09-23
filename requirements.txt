@@ -1,0 +1,9 @@
+pandas>=2.1
+numpy>=1.26
+pyarrow>=14.0
+networkx>=3.2
+scipy>=1.11
+PyYAML>=6.0
+streamlit>=1.49
+plotly>=5.22
+pytest>=8.0

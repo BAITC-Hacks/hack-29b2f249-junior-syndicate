@@ -321,7 +321,7 @@ document.addEventListener('submit',e=>{
 document.addEventListener('click',e=>{
  const b=e.target.closest('[data-action]');if(!b||b.disabled)return;tactile();
  const a=b.dataset.action;
- if(a==='nav'){page=b.dataset.page;pageLimit=30;render();window.scrollTo(0,0);}
+ if(a==='nav'){page=b.dataset.page;pageLimit=30;render();root.scrollTo(0,0);}
  else if(a==='auth-mode'){authMode=b.dataset.mode;recoverySent=false;renderAuth();}
  else if(['google','logout','run'].includes(a))send(a);
  else if(a==='export')send('export',{filename:b.dataset.file});

@@ -10,7 +10,7 @@ import yaml
 from .features import percentile_score
 
 ROLES = ["consolidator", "transit", "distributor", "terminal", "coordinator", "peripheral"]
-ROLE_COLORS = dict(zip(ROLES, ["#e76f51", "#3b82f6", "#f59e0b", "#22c55e", "#a855f7", "#94a3b8"]))
+ROLE_COLORS = dict(zip(ROLES, ["#F5B544", "#52B7E8", "#A78BEA", "#35C5B3", "#EF5A7C", "#8090AA"]))
 FACTOR_LABELS = {
     "fan_in": "Число плательщиков", "incoming_volume": "Входящий поток",
     "pagerank": "PageRank", "retention": "Наблюдаемое удержание",

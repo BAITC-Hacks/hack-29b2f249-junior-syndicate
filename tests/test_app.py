@@ -1,33 +1,46 @@
+import json
 from pathlib import Path
+import time
 
-import pandas as pd
-import pytest
 from streamlit.testing.v1 import AppTest
+
+from src.auth import account_action
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_ui_search_boundary_isolate_cluster_and_filters():
-    if not (ROOT / "output/node_features.csv").exists():
-        pytest.skip("Run pipeline first for UI integration test")
-    data = pd.read_csv(ROOT / "output/node_features.csv")
-    app = AppTest.from_file(str(ROOT / "app/app.py"), default_timeout=60).run()
+def test_unauthenticated_component_receives_no_analysis():
+    app = AppTest.from_file(str(ROOT / "app/app.py")).run()
     assert not app.exception
-    boundary = str(int(data[data.is_boundary_node].gid.iloc[0]))
-    isolated = str(int(data[data.total_degree.eq(0)].gid.iloc[0]))
-    app.selectbox(key="gid").select(boundary).run()
-    assert not app.exception
-    assert any(boundary in value.value for value in app.subheader)
-    app.selectbox(key="gid").select(isolated).run()
-    assert not app.exception
-    app.selectbox(key="mode").select("Кластер").run()
-    app.radio(key="color").set_value("Кластер").run()
-    app.selectbox(key="rank_role").select("consolidator").run()
-    assert not app.exception
+    args = json.loads(app.get("component_instance")[0].proto.json_args)
+    assert args["authenticated"] is False
+    assert args["payload"] is None
+    assert args["email"] == ""
 
 
-def test_ui_missing_output_has_helpful_state(tmp_path, monkeypatch):
-    monkeypatch.setenv("MONEY_GRAPH_OUTPUT", str(tmp_path))
-    app = AppTest.from_file(str(ROOT / "app/app.py"), default_timeout=30).run()
+def test_authenticated_missing_output_has_helpful_state(tmp_path, monkeypatch):
+    database = tmp_path / "users.sqlite3"
+    monkeypatch.setenv("MONEY_GRAPH_OUTPUT", str(tmp_path / "missing"))
+    monkeypatch.setenv("MONEY_GRAPH_ACCOUNTS", str(database))
+    account = account_action(database, "register", "analyst@example.com", "Long analyst password!")
+    now = time.time()
+    app = AppTest.from_file(str(ROOT / "app/app.py"))
+    app.session_state["account"] = {**account, "created": now, "last_seen": now}
+    app.run()
     assert not app.exception
-    assert "python run.py" in app.info[0].value
+    args = json.loads(app.get("component_instance")[0].proto.json_args)
+    assert args["authenticated"] is True
+    assert args["payload"] is None
+    assert "python run.py" in args["error"]
+
+
+def test_expired_session_receives_no_analysis(tmp_path, monkeypatch):
+    database = tmp_path / "users.sqlite3"
+    monkeypatch.setenv("MONEY_GRAPH_ACCOUNTS", str(database))
+    account = account_action(database, "register", "analyst@example.com", "Long analyst password!")
+    app = AppTest.from_file(str(ROOT / "app/app.py"))
+    app.session_state["account"] = {**account, "created": time.time() - 1900, "last_seen": time.time() - 1900}
+    app.run()
+    args = json.loads(app.get("component_instance")[0].proto.json_args)
+    assert args["payload"] is None
+    assert not args["authenticated"]

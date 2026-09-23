@@ -1,142 +1,117 @@
-"""Local analyst workspace: search, graph, explanations and CSV downloads."""
 from pathlib import Path
+import base64
 import os
 import sys
+import time
 
-import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.pipeline import explain_node
-from src.scoring import ROLES, amount_text
-from src.workspace import load_workspace, ranked_nodes, graph_view, counterparties, network_figure
+from src.auth import account_action, session_valid
+from src.pipeline import run
+from src.workspace import load_workspace, workspace_payload, node_dossier, ranked_nodes, simulation_payload
 
 OUTPUT = Path(os.environ.get("MONEY_GRAPH_OUTPUT", str(ROOT / "output")))
-st.set_page_config(page_title="Money Graph | Junior Syndicate", layout="wide")
-st.title("Money Graph")
-st.caption("Junior Syndicate · Анализ наблюдаемой сети переводов · Июль 2026")
-try:
-    nodes, edges, clusters, summary = load_workspace(OUTPUT)
-except FileNotFoundError:
-    st.info("Нет результатов анализа. Запустите python run.py из папки проекта.")
-    st.stop()
-except (ValueError, KeyError, pd.errors.ParserError) as error:
-    st.error(f"Не удалось прочитать результаты: {error}. Повторите python run.py.")
-    st.stop()
+DATABASE = Path(os.environ.get("MONEY_GRAPH_ACCOUNTS", str(ROOT / ".streamlit/users.sqlite3")))
+st.set_page_config(page_title="MoneyGraph Intelligence · Junior Syndicate", layout="wide", initial_sidebar_state="collapsed")
+st.markdown("""<style>
+header[data-testid="stHeader"],footer,[data-testid="stToolbar"]{display:none}
+.block-container{padding:0!important;max-width:100%!important}
+[data-testid="stVerticalBlock"]{gap:0!important}
+iframe{display:block;border:0;width:100%;color-scheme:dark}
+html,body,[data-testid="stAppViewContainer"]{background:#080b16}
+</style>""", unsafe_allow_html=True)
 
-overview = st.columns(4)
-for widget, label, value in zip(overview, ["Клиенты", "Связи", "Переводы", "Оборот, млн KZT"],
-                                [f"{len(nodes):,}", f"{len(edges):,}", f"{summary['transactions']:,}", f"{summary['total_observed_kzt'] / 1_000_000:.2f}"]):
-    widget.metric(label, value)
-st.caption(f"Seed: {summary['seeds']} · Кластеры: {len(clusters)} · Компоненты со связями: {summary['components_with_edges']} · Изоляты: {summary['isolated_nodes']} · Расчёт: {summary['runtime_seconds']:.2f} с")
-st.info("Роли — гипотезы для проверки. На depth=4 граф обрезан; входящие потоки неполны. Обоснованность роли не является вероятностью виновности.")
 
-ranked = ranked_nodes(nodes)
-st.sidebar.header("Найти клиента")
-selected = st.sidebar.selectbox("Поиск GID", ranked.gid.astype(str).tolist(), key="gid")
-gid = int(selected)
-card = explain_node(gid, features=nodes)
-metrics = card["metrics"]
-mode = st.sidebar.selectbox("Режим карты", ["Окрестность GID", "Кластер", "Крупнейшая компонента", "Весь граф"], key="mode")
-cluster_id = st.sidebar.selectbox("Кластер", sorted(clusters.cluster_id.tolist()), key="cluster")
-color = st.sidebar.radio("Цвет узлов", ["Роль", "Кластер"], key="color")
-st.sidebar.caption("Размер узла — приоритет. Стрелки показывают направление перевода. Наведите на узел или стрелку для деталей.")
-if st.sidebar.button("Обновить результаты"):
-    st.rerun()
+@st.cache_data(show_spinner=False)
+def read_results(directory: str, revision: tuple):
+    nodes, edges, clusters, summary = load_workspace(Path(directory))
+    return nodes, edges, workspace_payload(nodes, edges, clusters, summary)
 
-network_tab, priority_tab, cluster_tab, quality_tab, resilience_tab = st.tabs(["Карта и клиент", "Кого проверить", "Сообщества", "Качество данных", "Стресс-тест"])
-with network_tab:
-    st.subheader(f"GID {gid}")
-    st.write(card["evidence"])
-    st.write(f"Кандидат на роль: **{card['role']}**")
-    columns = st.columns(3)
-    for widget, label, value in zip(columns, ["Обоснованность", "Приоритет", "Depth / кластер"],
-                                    [f"{card['role_score']:.3f}", f"{card['priority_score']:.3f}", f"{metrics['depth']} / {card['cluster_id']}"]):
-        widget.metric(label, value)
-    visible_nodes, visible_edges = graph_view(nodes, edges, mode, gid, int(cluster_id))
-    st.caption(f"Показано {len(visible_nodes)} узлов и {len(visible_edges)} связей")
-    if gid not in set(visible_nodes.gid):
-        st.caption("Выбранный клиент вне текущего среза карты. Режим «Окрестность GID» покажет его связи.")
 
-    @st.cache_data(show_spinner="Строим карту сети…")
-    def draw_network(visible_nodes: pd.DataFrame, visible_edges: pd.DataFrame, selected_gid: int, color_by: str):
-        return network_figure(visible_nodes, visible_edges, selected_gid, color_by)
+@st.cache_data(show_spinner=False)
+def stress_results(directory: str, revision: tuple, count: int):
+    nodes, edges, _, _ = load_workspace(Path(directory))
+    return simulation_payload(nodes, edges, count)
 
-    st.plotly_chart(draw_network(visible_nodes, visible_edges, gid, "role" if color == "Роль" else "cluster_id"), width="stretch")
-    left, right = st.columns(2)
-    with left:
-        st.markdown("**Денежный поток внутри выборки**")
-        st.write(f"Вход: {metrics['sum_in']:,.0f} KZT · {int(metrics['n_in_tx'])} переводов")
-        st.write(f"Выход: {metrics['sum_out']:,.0f} KZT · {int(metrics['n_out_tx'])} переводов")
-        st.write(f"Плательщики: {metrics['in_degree']} · Получатели: {metrics['out_degree']}")
-        st.caption(f"Наблюдаемая разность: {metrics['observed_net']:,.0f} KZT — это не баланс счёта.")
-        st.write(f"FIFO-сопоставление ≤24ч: {metrics['forwarded_within_24h_ratio']:.0%}; ≤48ч: {metrics['forwarded_within_48h_ratio']:.0%}")
-        st.caption("Эвристика по датам, не доказательство перевода тех же денег. Сопоставления в один день исключены.")
-    with right:
-        st.markdown("**Почему такой приоритет**")
-        st.write(card["priority_why"])
-        st.dataframe(pd.DataFrame(card["priority_factors"])[["label", "contribution"]], hide_index=True, width="stretch")
-    with st.expander("Как рассчитана роль"):
-        st.dataframe(pd.DataFrame(card["role_factors"])[["label", "contribution"]], hide_index=True, width="stretch")
-        scores = pd.DataFrame({"role": ROLES, "score": [metrics[f"{role}_score"] for role in ROLES]})
-        st.bar_chart(scores.set_index("role"))
-        st.caption(f"Разница двух лучших scores: {metrics['role_margin']:.3f}; качество наблюдения: {metrics['observation_quality']:.2f}.")
-    left, right = st.columns(2)
-    for column, direction, title in ((left, "in", "От кого поступили"), (right, "out", "Кому отправлены")):
-        with column:
-            st.markdown(f"**{title}**")
-            table = counterparties(edges, gid, direction).copy()
-            table["gid"] = table.gid.astype(str)
-            st.dataframe(table, hide_index=True, width="stretch")
-    with st.expander("Ограничения и следующий запрос данных", expanded=bool(metrics["is_boundary_node"] or metrics["is_seed"])):
-        for limitation in card["limitations"]:
-            st.write("• " + limitation)
-        st.write("Для проверки гипотезы запросите полные входящие/исходящие операции, точное время и продолжение за depth=4.")
 
-with priority_tab:
-    selected_role = st.selectbox("Роль в рейтинге", ["Все", *ROLES], key="rank_role")
-    selected_cluster = st.selectbox("Кластер в рейтинге", ["Все", *[str(value) for value in sorted(clusters.cluster_id)]], key="rank_cluster")
-    table = ranked_nodes(nodes, None if selected_role == "Все" else selected_role, None if selected_cluster == "Все" else int(selected_cluster))
-    table = table[["gid", "role", "priority_score", "role_score", "cluster_id", "priority_why"]].head(100).copy()
-    table["gid"] = table.gid.astype(str)
-    st.caption("До 100 клиентов в выбранном срезе. Откройте GID через поиск слева.")
-    st.dataframe(table, hide_index=True, width="stretch")
-    for filename in ("nodes_roles.csv", "clusters.csv", "top_nodes.csv"):
-        st.download_button(f"Скачать {filename}", (OUTPUT / filename).read_bytes(), file_name=filename, mime="text/csv")
+google_enabled = False
+if (ROOT / ".streamlit/secrets.toml").exists():
+    google_enabled = bool(st.secrets.get("auth", {}).get("client_id"))
+oidc_user = bool(getattr(st.user, "is_logged_in", False))
+now = time.time()
+account = st.session_state.get("account", {})
+if account and not session_valid(DATABASE, account, now):
+    st.session_state.pop("account", None)
+    st.session_state.pop("response", None)
+    account = {}
+authenticated = bool(account or oidc_user)
+email = account.get("email", "") if account else (st.user.get("email", "Google account") if oidc_user else "")
+payload = None
+load_error = ""
+revision = ()
+if authenticated:
+    try:
+        revision = tuple((OUTPUT / name).stat().st_mtime_ns for name in ("node_features.csv", "graph_edges.csv", "clusters.csv", "run_summary.json"))
+        nodes, edges, payload = read_results(str(OUTPUT), revision)
+    except FileNotFoundError:
+        load_error = "Нет результатов анализа. Нажмите «Запустить анализ» или выполните python run.py."
+    except (ValueError, KeyError, OSError) as error:
+        load_error = f"Не удалось прочитать результаты: {error}"
 
-with cluster_tab:
-    group = clusters[clusters.cluster_id.eq(cluster_id)].iloc[0]
-    st.subheader(f"Кластер {cluster_id}")
-    st.write(group.hypothesis)
-    st.write(f"Узлов: {group.n_nodes} · Seed: {group.n_seed} · Внутренний оборот: {group.sum_kzt_internal:,.0f} KZT")
-    group_nodes, group_edges = graph_view(nodes, edges, "Кластер", gid, int(cluster_id))
-    st.plotly_chart(draw_network(group_nodes, group_edges, gid, "role"), width="stretch", key="cluster_graph")
-    table = ranked_nodes(nodes, cluster=int(cluster_id))[["gid", "role", "priority_score", "evidence"]].head(20).copy()
-    table["gid"] = table.gid.astype(str)
-    st.dataframe(table, hide_index=True, width="stretch")
-
-with quality_tab:
-    st.write(f"Граничные узлы без исходящих: {summary['boundary_sinks']}; среди них terminal: {summary['boundary_terminals']}.")
-    st.write(f"Все компоненты, включая изоляты: {summary['components_including_isolates']}.")
-    for warning in summary["warnings"]:
-        st.warning(warning)
-    distribution = pd.DataFrame.from_dict(summary["role_distribution"], orient="index", columns=["nodes"])
-    st.bar_chart(distribution)
-    st.json({"input_sha256": summary["input_sha256"], "betweenness": summary["betweenness"], "date_precision": summary["date_precision"]})
-
-with resilience_tab:
-    st.subheader("Как меняется связность при удалении узлов")
-    st.caption("Сценарный расчёт на неориентированной проекции. Узлы по приоритету сравниваются с 30 случайными выборками. Это не рекомендация блокировки счетов.")
-    resilience_path = OUTPUT / "resilience.csv"
-    if resilience_path.exists():
-        resilience = pd.read_csv(resilience_path)
-        if resilience.empty:
-            st.info("Недостаточно узлов для стресс-теста.")
+workspace = components.declare_component("analyst_workspace", path=str(ROOT / "app/frontend"))
+event = workspace(payload=payload, authenticated=authenticated, email=email, google_enabled=google_enabled,
+                  error=load_error, response=st.session_state.get("response", {}), key="workspace", default=None)
+if isinstance(event, dict) and event.get("id") and event["id"] != st.session_state.get("handled_event"):
+    st.session_state.handled_event = event["id"]
+    response = {"id": event["id"], "action": event.get("action")}
+    try:
+        action = event.get("action")
+        if action in ("login", "register", "recover"):
+            result = account_action(DATABASE, action, str(event.get("email", "")), str(event.get("password", "")), str(event.get("recovery", "")))
+            code = result.pop("recovery_code", None)
+            if code:
+                response["recovery_code"] = code
+            st.session_state.account = {**result, "created": now, "last_seen": now}
+        elif action == "google":
+            if not google_enabled:
+                raise ValueError("Google OAuth ещё не настроен владельцем приложения.")
+            st.login()
+        elif action == "logout":
+            st.session_state.pop("account", None)
+            if oidc_user:
+                st.logout()
+        elif not authenticated:
+            raise ValueError("Для доступа к данным войдите в аккаунт.")
+        elif action == "run":
+            run(Path(os.environ.get("MONEY_GRAPH_DATA", str(ROOT / "data"))), OUTPUT)
+            read_results.clear()
+            stress_results.clear()
+            response["message"] = "Анализ завершён. Все показатели обновлены."
+        elif payload is None:
+            raise ValueError(load_error)
+        elif action == "select":
+            response["card"] = node_dossier(nodes, edges, str(event.get("gid", "")))
+        elif action == "query":
+            cluster = event.get("cluster")
+            selected = ranked_nodes(nodes, event.get("role") or None, int(cluster) if cluster not in (None, "") else None, str(event.get("query", "")))
+            response["ids"] = selected.gid.astype(str).tolist()
+        elif action == "simulate":
+            response["simulation"] = stress_results(str(OUTPUT), revision, int(event.get("count", 5)))
+        elif action == "export":
+            filename = event.get("filename", "nodes_roles.csv")
+            if filename not in ("nodes_roles.csv", "clusters.csv", "top_nodes.csv", "analysis_report.md", "run_summary.json"):
+                raise ValueError("Неизвестный файл экспорта.")
+            response["download"] = {"filename": filename, "base64": base64.b64encode((OUTPUT / filename).read_bytes()).decode()}
         else:
-            st.line_chart(resilience.pivot(index="removed_n", columns="strategy", values="largest_component_remaining_fraction"), x_label="Удалено узлов", y_label="Доля оставшихся узлов в крупнейшей компоненте")
-            st.dataframe(resilience, hide_index=True, width="stretch")
-    else:
-        st.info("Обновите результаты командой python run.py.")
+            raise ValueError("Неизвестное действие.")
+        if st.session_state.get("account"):
+            st.session_state.account["last_seen"] = now
+    except (ValueError, KeyError, OSError, TypeError) as error:
+        response["error"] = str(error)
+    st.session_state.response = response
+    st.rerun()

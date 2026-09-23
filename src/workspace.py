@@ -11,6 +11,8 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from .scoring import ROLE_COLORS
+from .pipeline import explain_node
+from .resilience import assess_resilience
 
 
 def load_workspace(directory: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
@@ -21,12 +23,15 @@ def load_workspace(directory: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
     return features, edges, clusters, summary
 
 
-def ranked_nodes(features: pd.DataFrame, role: str | None = None, cluster: int | None = None) -> pd.DataFrame:
+def ranked_nodes(features: pd.DataFrame, role: str | None = None, cluster: int | None = None, query: str = "") -> pd.DataFrame:
     selected = features
     if role:
         selected = selected[selected.role.eq(role)]
     if cluster is not None:
         selected = selected[selected.cluster_id.eq(cluster)]
+    if query.strip():
+        text = query.strip().lower()
+        selected = selected[selected.gid.astype(str).str.contains(text, regex=False) | selected.role.str.contains(text, case=False, regex=False)]
     return selected.sort_values(["priority_score", "gid"], ascending=[False, True]).reset_index(drop=True)
 
 
@@ -92,3 +97,74 @@ def network_figure(nodes: pd.DataFrame, edges: pd.DataFrame, selected_gid: int, 
                          legend={"orientation": "h", "y": 1.07}, hovermode="closest",
                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
     return figure
+
+
+def workspace_payload(features: pd.DataFrame, edges: pd.DataFrame, clusters: pd.DataFrame, summary: dict) -> dict:
+    ranked = ranked_nodes(features)
+    columns = ["gid", "role", "role_score", "priority_score", "cluster_id", "depth", "is_seed",
+               "is_boundary_node", "in_degree", "out_degree", "sum_in", "sum_out", "evidence", "priority_why"]
+    records = ranked[columns].copy()
+    records["gid"] = records.gid.astype(str)
+    graph = nx.Graph()
+    graph.add_nodes_from(features.gid)
+    graph.add_edges_from(edges[["src", "dst"]].itertuples(index=False, name=None))
+    positions = {}
+    groups = sorted(features.groupby("cluster_id"), key=lambda item: (-len(item[1]), item[0]))
+    for index, (cluster_id, members) in enumerate(groups):
+        angle = index * math.pi * (3 - math.sqrt(5))
+        distance = 185 * math.sqrt(index)
+        center = np.array([math.cos(angle) * distance, math.sin(angle) * distance])
+        local = nx.spring_layout(graph.subgraph(sorted(members.gid)), seed=42, iterations=40, scale=65 + min(45, math.sqrt(len(members))))
+        for gid, point in local.items():
+            positions[str(gid)] = [round(float(point[0] + center[0]), 2), round(float(point[1] + center[1]), 2)]
+    records["x"] = records.gid.map(lambda gid: positions[gid][0])
+    records["y"] = records.gid.map(lambda gid: positions[gid][1])
+    links = edges[["src", "dst", "sum_kzt", "n_tx"]].copy()
+    links["src"] = links.src.astype(str)
+    links["dst"] = links.dst.astype(str)
+    cluster_rows = clusters.sort_values(["sum_kzt_internal", "cluster_id"], ascending=[False, True]).copy()
+    if "top_gids" in cluster_rows:
+        cluster_rows["top_gids"] = cluster_rows.top_gids.astype(str)
+    role_lookup = features.set_index("gid").role
+    flows = edges.assign(source_role=edges.src.map(role_lookup), target_role=edges.dst.map(role_lookup))
+    flows = flows.groupby(["source_role", "target_role"], as_index=False).sum_kzt.sum()
+    return {
+        "nodes": json.loads(records.to_json(orient="records")), "edges": json.loads(links.to_json(orient="records")),
+        "clusters": json.loads(cluster_rows.to_json(orient="records")), "colors": ROLE_COLORS,
+        "overview_ids": records.gid.head(120).tolist(),
+        "role_flows": json.loads(flows.to_json(orient="records")),
+        "summary": {key: value for key, value in summary.items() if key not in ("input_directory", "config")},
+        "coverage": {"seed_without_outgoing": int((features.is_seed & features.out_degree.eq(0)).sum()),
+                     "high_priority_nodes": int(features.priority_score.ge(.7).sum()),
+                     "multi_seed_clusters": int(clusters.n_seed.gt(1).sum()),
+                     "depth": {str(key): int(value) for key, value in features.depth.value_counts().sort_index().items()}},
+    }
+
+
+def node_dossier(features: pd.DataFrame, edges: pd.DataFrame, gid: str) -> dict:
+    card = explain_node(int(gid), features=features)
+    card["gid"] = str(card["gid"])
+    card["metrics"]["gid"] = card["gid"]
+    for direction in ("in", "out"):
+        table = counterparties(edges, int(gid), direction).copy()
+        table["gid"] = table.gid.astype(str)
+        card[direction] = json.loads(table.to_json(orient="records"))
+    return card
+
+
+def simulation_payload(features: pd.DataFrame, edges: pd.DataFrame, count: int) -> dict:
+    if not 1 <= count <= min(20, len(features) - 1):
+        raise ValueError("Число удаляемых узлов должно быть от 1 до 20 и меньше размера сети.")
+    graph = nx.DiGraph()
+    graph.add_nodes_from(features.gid)
+    graph.add_edges_from(edges[["src", "dst"]].itertuples(index=False, name=None))
+    ranked = ranked_nodes(features).gid.tolist()
+    result = assess_resilience(graph, ranked, removal_counts=(count,))
+    remaining = graph.to_undirected()
+    original_largest = max(map(len, nx.connected_components(remaining)), default=0)
+    original_components = nx.number_connected_components(remaining)
+    remaining.remove_nodes_from(ranked[:count])
+    sizes = sorted(map(len, nx.connected_components(remaining)), reverse=True)
+    return {"removed": list(map(str, ranked[:count])), "sizes": sizes,
+            "original_largest": original_largest, "original_components": original_components,
+            "results": json.loads(result.to_json(orient="records"))}

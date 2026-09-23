@@ -2,11 +2,18 @@ import json
 from pathlib import Path
 import time
 
+import pytest
+
 from streamlit.testing.v1 import AppTest
 
 from src.auth import account_action
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def local_auth(monkeypatch):
+    monkeypatch.setenv("MONEY_GRAPH_AUTH", "local")
 
 
 def test_unauthenticated_component_receives_no_analysis():

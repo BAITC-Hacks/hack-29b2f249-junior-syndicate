@@ -5,3 +5,5 @@ output/
 data/*.parquet
 .streamlit/secrets.toml
 *.log
+.env
+.env.*

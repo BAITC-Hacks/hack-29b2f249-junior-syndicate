@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.auth import account_action, session_valid
+from src.auth import account_action, session_valid, SupabaseAuth
 from src.pipeline import run
 from src.workspace import load_workspace, workspace_payload, node_dossier, ranked_nodes, simulation_payload
 
@@ -39,16 +39,44 @@ def stress_results(directory: str, revision: tuple, count: int):
     return simulation_payload(nodes, edges, count)
 
 
-google_enabled = False
-if (ROOT / ".streamlit/secrets.toml").exists():
-    google_enabled = bool(st.secrets.get("auth", {}).get("client_id"))
-oidc_user = bool(getattr(st.user, "is_logged_in", False))
+try:
+    settings = st.secrets.to_dict()
+except FileNotFoundError:
+    settings = {}
+supabase_settings = settings.get("supabase", {})
+supabase_url = os.environ.get("SUPABASE_URL", supabase_settings.get("url", ""))
+auth_mode = os.environ.get("MONEY_GRAPH_AUTH", "supabase" if supabase_url else "local")
+supabase = None
+auth_error = ""
+try:
+    if auth_mode == "supabase":
+        supabase = SupabaseAuth(supabase_url,
+                                os.environ.get("SUPABASE_PUBLISHABLE_KEY", supabase_settings.get("publishable_key", "")),
+                                os.environ.get("MONEY_GRAPH_ALLOWED_EMAILS", supabase_settings.get("allowed_emails", "")))
+    elif auth_mode != "local":
+        raise ValueError("Неизвестный режим авторизации.")
+except ValueError as error:
+    auth_error = str(error)
+google_enabled = auth_mode == "local" and bool(settings.get("auth", {}).get("client_id"))
+oidc_user = auth_mode == "local" and bool(getattr(st.user, "is_logged_in", False))
 now = time.time()
 account = st.session_state.get("account", {})
-if account and not session_valid(DATABASE, account, now):
-    st.session_state.pop("account", None)
-    st.session_state.pop("response", None)
+had_account = bool(account)
+try:
+    if account:
+        if auth_mode == "supabase":
+            account = supabase.validate(account, now) if supabase else {}
+        elif account.get("provider") == "supabase" or not session_valid(DATABASE, account, now):
+            account = {}
+except ValueError as error:
     account = {}
+    auth_error = str(error)
+if account:
+    st.session_state.account = account
+else:
+    st.session_state.pop("account", None)
+    if had_account:
+        st.session_state.pop("response", None)
 authenticated = bool(account or oidc_user)
 email = account.get("email", "") if account else (st.user.get("email", "Google account") if oidc_user else "")
 payload = None
@@ -65,13 +93,24 @@ if authenticated:
 
 workspace = components.declare_component("analyst_workspace", path=str(ROOT / "app/frontend"))
 event = workspace(payload=payload, authenticated=authenticated, email=email, google_enabled=google_enabled,
+                  auth_mode=auth_mode, auth_error=auth_error,
                   error=load_error, response=st.session_state.get("response", {}), key="workspace", default=None)
 if isinstance(event, dict) and event.get("id") and event["id"] != st.session_state.get("handled_event"):
     st.session_state.handled_event = event["id"]
     response = {"id": event["id"], "action": event.get("action")}
     try:
         action = event.get("action")
-        if action in ("login", "register", "recover"):
+        if action in ("login", "register", "recover", "recover_request") and auth_mode == "supabase":
+            if not supabase:
+                raise ValueError(auth_error)
+            result = supabase.action(action, str(event.get("email", "")), str(event.get("password", "")), str(event.get("recovery", "")))
+            new_account = result.pop("account", None)
+            response.update(result)
+            if new_account:
+                st.session_state.account = {**new_account, "created": now, "last_seen": now}
+            elif result.get("password_updated"):
+                st.session_state.pop("account", None)
+        elif action in ("login", "register", "recover") and auth_mode == "local":
             result = account_action(DATABASE, action, str(event.get("email", "")), str(event.get("password", "")), str(event.get("recovery", "")))
             code = result.pop("recovery_code", None)
             if code:
@@ -83,6 +122,8 @@ if isinstance(event, dict) and event.get("id") and event["id"] != st.session_sta
             st.login()
         elif action == "logout":
             st.session_state.pop("account", None)
+            if account.get("provider") == "supabase" and supabase:
+                supabase.request("POST", "logout?scope=local", token=account["access_token"])
             if oidc_user:
                 st.logout()
         elif not authenticated:

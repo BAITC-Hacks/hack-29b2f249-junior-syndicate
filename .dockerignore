@@ -1,0 +1,14 @@
+**
+!Dockerfile
+!requirements-lock.txt
+!run.py
+!app/
+!app/**
+!src/
+!src/**
+!config/
+!config/**
+!.streamlit/
+!.streamlit/config.toml
+**/__pycache__/
+**/*.pyc

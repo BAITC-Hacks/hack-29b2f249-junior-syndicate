@@ -3,6 +3,7 @@ from pathlib import Path
 import time
 
 import pytest
+import streamlit as st
 
 from streamlit.testing.v1 import AppTest
 
@@ -23,6 +24,29 @@ def test_unauthenticated_component_receives_no_analysis():
     assert args["authenticated"] is False
     assert args["payload"] is None
     assert args["email"] == ""
+
+
+def test_complete_google_oauth_config_enables_google_login(monkeypatch):
+    monkeypatch.setattr(type(st.secrets), "to_dict", lambda self: {"auth": {
+        "redirect_uri": "https://qadam.example/oauth2callback",
+        "cookie_secret": "test-cookie-secret",
+        "client_id": "google-client-id",
+        "client_secret": "google-client-secret",
+        "server_metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
+    }})
+    app = AppTest.from_file(str(ROOT / "app/app.py")).run()
+    assert not app.exception
+    args = json.loads(app.get("component_instance")[0].proto.json_args)
+    assert args["google_enabled"] is True
+
+
+def test_partial_google_oauth_config_stays_disabled(monkeypatch):
+    monkeypatch.setattr(type(st.secrets), "to_dict", lambda self: {"auth": {"client_id": "google-client-id"}})
+    app = AppTest.from_file(str(ROOT / "app/app.py")).run()
+    assert not app.exception
+    args = json.loads(app.get("component_instance")[0].proto.json_args)
+    assert args["google_enabled"] is False
+    assert "не полностью" in args["auth_error"]
 
 
 def test_authenticated_missing_output_has_helpful_state(tmp_path, monkeypatch):

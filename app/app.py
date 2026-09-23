@@ -46,6 +46,7 @@ try:
 except FileNotFoundError:
     settings = {}
 supabase_settings = settings.get("supabase", {})
+google_settings = settings.get("auth", {})
 supabase_url = os.environ.get("SUPABASE_URL", supabase_settings.get("url", ""))
 auth_mode = os.environ.get("MONEY_GRAPH_AUTH", "supabase" if supabase_url else "local")
 supabase = None
@@ -59,7 +60,10 @@ try:
         raise ValueError("Неизвестный режим авторизации.")
 except ValueError as error:
     auth_error = str(error)
-google_enabled = auth_mode == "local" and bool(settings.get("auth", {}).get("client_id"))
+google_required = ("redirect_uri", "cookie_secret", "client_id", "client_secret", "server_metadata_url")
+google_enabled = auth_mode == "local" and all(str(google_settings.get(key, "")).strip() for key in google_required)
+if auth_mode == "local" and google_settings and not google_enabled:
+    auth_error = "Google OAuth настроен не полностью. Проверьте redirect_uri, cookie_secret, client_id и client_secret."
 oidc_user = auth_mode == "local" and bool(getattr(st.user, "is_logged_in", False))
 now = time.time()
 account = st.session_state.get("account", {})

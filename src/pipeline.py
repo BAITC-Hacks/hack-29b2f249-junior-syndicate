@@ -15,7 +15,7 @@ from .load_data import InputData, load_data
 from .graph_builder import build_graph, communities
 from .features import calculate_features
 from .scoring import ROLES, FACTOR_LABELS, assign_roles, assign_priority, generate_evidence, load_config
-from .resilience import assess_resilience
+from .resilience import assess_resilience, assess_ranking_stability
 
 LOGGER = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -88,7 +88,7 @@ def eda_report(data: InputData, features: pd.DataFrame) -> dict:
 
 
 def run(data_dir: str | Path = PROJECT_ROOT / "data", output_dir: str | Path = PROJECT_ROOT / "output",
-        config_path: str | Path = PROJECT_ROOT / "config/scoring.yaml") -> pd.DataFrame:
+        config_path: str | Path = PROJECT_ROOT / "config/scoring.yaml", check_stability: bool = False) -> pd.DataFrame:
     started = time.perf_counter()
     data_dir, destination = Path(data_dir).resolve(), Path(output_dir).resolve()
     if destination == data_dir:
@@ -128,6 +128,11 @@ def run(data_dir: str | Path = PROJECT_ROOT / "data", output_dir: str | Path = P
                         ("node_features", scored), ("graph_edges", data.edges)):
         table.to_csv(destination / f"{name}.csv", index=False, encoding="utf-8-sig")
     assess_resilience(graph, ranked.gid.tolist(), config["random_seed"]).to_csv(destination / "resilience.csv", index=False)
+    if check_stability:
+        LOGGER.info("Checking top-20 sensitivity: priority weights and community resolution separately")
+        stability_scenarios, stability_nodes = assess_ranking_stability(data, graph, features, config)
+        stability_scenarios.to_csv(destination / "ranking_stability_scenarios.csv", index=False, encoding="utf-8-sig")
+        stability_nodes.to_csv(destination / "ranking_stability_nodes.csv", index=False, encoding="utf-8-sig")
     summary = {
         "input_directory": str(data_dir), "source": "provided parquet",
         "nodes": len(data.nodes), "edges": len(data.edges), "transactions": len(data.transactions),
@@ -147,6 +152,11 @@ def run(data_dir: str | Path = PROJECT_ROOT / "data", output_dir: str | Path = P
         "input_sha256": {name: hashlib.sha256((data_dir / f"{name}.parquet").read_bytes()).hexdigest() for name in ("nodes", "edges", "transactions")},
         "runtime_seconds": round(time.perf_counter() - started, 3),
     }
+    if check_stability:
+        summary["ranking_stability"] = {"top_n": int(stability_scenarios.top_n.iloc[0]),
+                                        "perturbations": len(stability_scenarios) - 1,
+                                        "priority_weight_multipliers": [.9, 1.1],
+                                        "community_resolution_multipliers": [.8, 1.2]}
     for name, report in (("run_summary", summary), ("eda_report", eda)):
         (destination / f"{name}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2, default=int, allow_nan=False), encoding="utf-8")
     report_lines = ["# Результаты Qadam", "",
@@ -174,6 +184,34 @@ def run(data_dir: str | Path = PROJECT_ROOT / "data", output_dir: str | Path = P
                          "Даты имеют точность до дня. FIFO не доказывает происхождение средств, не сопоставляет события в один день и не расходует один платёж дважды.", ""])
     report_lines.extend(f"- {warning}" for warning in warnings)
     (destination / "analysis_report.md").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+    if check_stability:
+        lines = ["# Qadam: устойчивость топ-20", "",
+                 "Проверка чувствительности к настройкам, не оценка точности и не вероятность виновности.",
+                 "Основной рейтинг не меняется. Базовый сценарий исключён из частот и диапазонов мест.",
+                 "Каждый вес priority меняется отдельно на ±10%, затем все веса делятся на их новую сумму.",
+                 "Отдельно resolution умножается на 0.8 и 1.2; заново рассчитываются сообщества, признаки, роли и приоритет.",
+                 "Random seed и остальные параметры фиксированы. Не проверяются совместные изменения весов, пороги ролей и полнота данных.",
+                 "При равных score порядок определяется GID по возрастанию, а не аналитическим отличием узлов.",
+                 "Частота попадания относится только к указанным сценариям и не является вероятностью.", "",
+                 "## Сценарии", "", "| Сценарий | Совпало с базовым топом | Макс. сдвиг базового топа | Кластеров | Изменений роли | Равенство на границе топа |",
+                 "|---|---:|---:|---:|---:|---|"]
+        lines.extend(f"| {row.scenario} | {row.overlap_count}/{row.top_n} | {row.max_abs_rank_shift_base_top} | {row.n_clusters} | {row.role_changes} | {'да' if row.cutoff_tie_crosses_top_n else 'нет'} |"
+                     for row in stability_scenarios.itertuples())
+        for kind, title in (("priority_weights", "Веса приоритета"), ("community_resolution", "Кластеризация")):
+            group = stability_nodes[stability_nodes.kind.eq(kind) & stability_nodes.in_baseline_top]
+            kept = int(group.top_n_hits.eq(group.scenario_count).sum())
+            LOGGER.info("Stability %s: %s/%s baseline top nodes retained in every scenario", kind, kept, len(group))
+            lines.extend(["", f"## {title}", "", f"Остались в топе во всех сценариях этой группы: {kept}/{len(group)}.", "",
+                          "| GID | Базовое место | Попаданий в топ / сценариев | Лучшее место | Худшее место | Изменений роли |",
+                          "|---|---:|---:|---:|---:|---:|"])
+            lines.extend(f"| {row.gid} | {row.baseline_rank} | {row.top_n_hits}/{row.scenario_count} | {row.best_rank} | {row.worst_rank} | {row.role_change_count} |"
+                         for row in group.itertuples())
+        lines.extend(["", "## Воспроизводимость", "", "Полные результаты всех узлов: ranking_stability_nodes.csv; параметры и состав изменений: ranking_stability_scenarios.csv.",
+                      "Конфигурация базового расчёта:", "", "```json", json.dumps(config, ensure_ascii=False, indent=2), "```", "",
+                      "SHA256 входных Parquet:", ""])
+        lines.extend(f"- {name}: {digest}" for name, digest in summary["input_sha256"].items())
+        lines.extend(["", "Ограничения: depth=4 обрезает выход; входы seed неполны; другие банки и переводы ниже порога не наблюдаются. Размеченных ролей нет."])
+        (destination / "ranking_stability_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     LOGGER.info("[8/8] Pipeline completed: %.3f seconds", summary["runtime_seconds"])
     LOGGER.info("Roles: %s", summary["role_distribution"])
     LOGGER.info("Clusters=%s; components=%s (including isolates); boundary terminals=%s", summary["clusters"], summary["components_including_isolates"], summary["boundary_terminals"])
@@ -211,14 +249,15 @@ def explain_node(gid: int, output_dir: str | Path = PROJECT_ROOT / "output", fea
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Qadam: parquet → roles, clusters, priority")
+    parser = argparse.ArgumentParser(description="Qadam: parquet -> roles, clusters, priority")
     parser.add_argument("--data", type=Path, default=PROJECT_ROOT / "data")
     parser.add_argument("--out", type=Path, default=PROJECT_ROOT / "output")
     parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "config/scoring.yaml")
+    parser.add_argument("--check-stability", action="store_true", help="Additionally audit top-20 sensitivity without changing the baseline ranking")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     try:
-        run(args.data, args.out, args.config)
+        run(args.data, args.out, args.config, check_stability=args.check_stability)
     except (ValueError, FileNotFoundError) as error:
         parser.exit(1, f"Pipeline failed: {error}\n")
 

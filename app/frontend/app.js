@@ -31,7 +31,7 @@ const money = v => Number(v||0).toLocaleString('ru-RU', {maximumFractionDigits:0
 const shortMoney = v => Number(v)>=1e6 ? (v/1e6).toFixed(1)+' млн' : Number(v)>=1e3 ? (v/1e3).toFixed(0)+' тыс.' : num(v);
 const score = v => Number(v||0).toFixed(3);
 const root = document.querySelector('#app');
-let D=null, byId=new Map(), A={}, page='overview', selected=null, card=null, mode='overview', colorMode='role', networkTab='graph', activeCluster=null, authMode='login', resultIds=null, query='', roleFilter='', clusterFilter='', pageLimit=30, simulation=null, removalCount=5, haptics=false, busy=false, pending=null, queued=[], lastResponse=null, layoutRevision='', searchTimer, toastTimer;
+let D=null, byId=new Map(), A={}, page='overview', selected=null, card=null, mode='overview', colorMode='role', networkTab='graph', activeCluster=null, authMode='login', resultIds=null, query='', roleFilter='', clusterFilter='', pageLimit=30, simulation=null, removalCount=5, haptics=false, busy=false, pending=null, queued=[], lastResponse=null, layoutRevision='', searchTimer, toastTimer, ai=null;
 let recoverySent=false;
 const pages = {overview:['Обзор','grid'],network:['Анализ сети','graph'],investigations:['Приоритет проверок','target'],clusters:['Кластеры','cluster'],ranking:['Все узлы','list'],stress:['Стресс-тест','shield'],coverage:['Качество данных','data'],exports:['Экспорт','download'],about:['Методология','info']};
 const badge = n => '<span class="badge" style="--role:'+D.colors[n.role]+'"><span class="dot"></span>'+esc(n.role)+'</span>';
@@ -53,13 +53,13 @@ window.addEventListener('message',event=>{
  const wasAuthenticated=!!D;
  if(!A.authenticated) {
   if(wasAuthenticated) authMode='login';
-  D=null;byId.clear();selected=null;card=null;resultIds=null;simulation=null;layoutRevision='';
+  D=null;byId.clear();selected=null;card=null;ai=null;queued=[];resultIds=null;simulation=null;layoutRevision='';
   if(wasAuthenticated || !root.querySelector('.auth-page')) { document.querySelector('#modal').innerHTML=''; renderAuth(); }
  } else if(A.payload) {
   const revision=JSON.stringify(A.payload.summary.input_sha256)+A.payload.summary.runtime_seconds;
   const changed=!D || revision!==layoutRevision || A.response?.action==='run';
   D=A.payload;byId=new Map(D.nodes.map(n=>[n.gid,n]));layoutRevision=revision;
-  if(changed) { if(!wasAuthenticated) page='overview'; render(); }
+  if(changed) { ai=null;card=null; if(!wasAuthenticated) page='overview'; render(); }
  } else { renderMissing(); }
  const response=A.response;
  if(response?.id && response.id!==lastResponse) {
@@ -91,6 +91,10 @@ window.addEventListener('message',event=>{
    }
    if(response.recovery_code) openRecovery(response.recovery_code);
   }
+  if(response.action==='explain' && ai?.gid===response.gid && selected===response.gid) {
+   ai={gid:response.gid,loading:false,result:response.explanation||null,error:response.error||''};
+   renderCard();if(document.querySelector('#dossier-modal')) openDossier();
+  }
   if(queued.length && !pending) {const event=queued.shift();pending=event;busy=true;post('streamlit:setComponentValue',{value:event,dataType:'json'});}
  }
  fitFrame();
@@ -101,7 +105,7 @@ function authArt() {
 }
 function renderAuth() {
  const register=authMode==='register',recover=authMode==='recover',cloud=A.auth_mode==='supabase',requestCode=cloud&&recover&&!recoverySent;
- root.innerHTML='<div class="auth-page"><section class="auth-story grid-bg"><div class="auth-brand">'+logo+' MoneyGraph<span class="muted small"> / Intelligence</span></div><div>'+authArt()+'<div class="eyebrow">JUNIOR SYNDICATE · HACKALEM AI</div><h1>Сеть переводов.<br><em>Ясная структура.</em></h1><p>Восстановите структуру финансовой сети. Найдите ключевые узлы. Обоснуйте следующую проверку.</p></div><div class="auth-foot">'+(cloud?'Вход через Supabase · Доступ только для приглашённых аналитиков':'Локальная рабочая область · Данные остаются на этом компьютере')+'</div></section><section class="auth-content"><div class="auth-inner"><div class="auth-symbol">'+icon(recover?'lock':'login')+'</div><h1>'+(register?'Создать аккаунт':recover?'Восстановить доступ':'С возвращением')+'</h1><p class="subtitle">'+(register?'Ваше рабочее пространство для анализа сети.':recover?(cloud?'Запросите письмо, затем вставьте код или ссылку восстановления.':'Используйте резервный код, сохранённый при регистрации.'):'Войдите в рабочую область аналитика.')+'</p>'+
+ root.innerHTML='<div class="auth-page"><section class="auth-story grid-bg"><div class="auth-brand">'+logo+' Qadam<span class="muted small"> / Intelligence</span></div><div>'+authArt()+'<div class="eyebrow">JUNIOR SYNDICATE · HACKALEM AI</div><h1>Сеть переводов.<br><em>Ясная структура.</em></h1><p>Восстановите структуру финансовой сети. Найдите ключевые узлы. Обоснуйте следующую проверку.</p></div><div class="auth-foot">'+(cloud?'Вход через Supabase · Доступ только для приглашённых аналитиков':'Локальный анализ · ИИ-пояснение по отдельному запросу')+'</div></section><section class="auth-content"><div class="auth-inner"><div class="auth-symbol">'+icon(recover?'lock':'login')+'</div><h1>'+(register?'Создать аккаунт':recover?'Восстановить доступ':'С возвращением')+'</h1><p class="subtitle">'+(register?'Ваше рабочее пространство для анализа сети.':recover?(cloud?'Запросите письмо, затем вставьте код или ссылку восстановления.':'Используйте резервный код, сохранённый при регистрации.'):'Войдите в рабочую область аналитика.')+'</p>'+
  (!register&&!recover?'<button class="google-btn" data-action="google" '+(!A.google_enabled?'disabled':'')+'><span class="google-letter">G</span>Продолжить с Google</button>'+(!A.google_enabled?'<p class="auth-hint">'+(cloud?'Вход через Google пока недоступен. Используйте email.':'Вход через Google появится после настройки OAuth владельцем.')+'</p>':'')+'<div class="auth-divider">или по email</div>':'')+
  '<form class="auth-form" id="auth-form"><label for="email">Email</label><input id="email" name="email" type="email" placeholder="you@example.com" autocomplete="username" required maxlength="254">'+
  (recover&&!requestCode?'<label for="recovery">'+(cloud?'Код или ссылка из письма':'Резервный код')+'</label><input id="recovery" name="recovery" autocomplete="one-time-code" required placeholder="Код восстановления">':'')+
@@ -109,12 +113,12 @@ function renderAuth() {
  '<div id="auth-error" class="auth-error '+(A.auth_error?'':'hidden')+'" role="alert">'+esc(A.auth_error||'')+'</div><button class="btn gold" type="submit">'+(register?'Создать аккаунт':recover?(requestCode?'Отправить письмо':'Обновить пароль'):'Войти')+icon('arrow')+'</button></form><div class="auth-switch">'+(register||recover?'Уже есть аккаунт? <button class="text-btn" data-action="auth-mode" data-mode="login">Войти</button>':'Первый визит? <button class="text-btn" data-action="auth-mode" data-mode="register">Создать аккаунт</button>')+'</div><p class="auth-hint" style="margin-top:28px">'+icon('lock')+' Пароли защищены · Сессия ограничена по времени</p></div></section></div>';
 }
 function renderMissing() {
- root.innerHTML='<div class="main" style="margin:0"><div class="topbar"><div><div class="eyebrow">JUNIOR SYNDICATE</div><h1>MoneyGraph Intelligence</h1></div><button class="btn" data-action="logout">'+icon('logout')+' Выйти</button></div><div class="panel section-empty"><h2>Подготовим рабочую область</h2><p style="margin:15px">'+esc(A.error)+'</p><button class="btn gold" data-action="run">'+icon('play')+' Запустить анализ</button></div></div>';
+ root.innerHTML='<div class="main" style="margin:0"><div class="topbar"><div><div class="eyebrow">JUNIOR SYNDICATE</div><h1>Qadam</h1></div><button class="btn" data-action="logout">'+icon('logout')+' Выйти</button></div><div class="panel section-empty"><h2>Подготовим рабочую область</h2><p style="margin:15px">'+esc(A.error)+'</p><button class="btn gold" data-action="run">'+icon('play')+' Запустить анализ</button></div></div>';
 }
 function render() {
  if(!D) return;
- const titles={overview:['MoneyGraph Intelligence','Реконструкция финансовой сети и приоритет проверок'],network:['Анализ сети','Направление потоков · Связи клиентов · Топология сообществ'],investigations:['Приоритет проверок','Очередь аналитика · Ранжирование по рассчитанной значимости'],clusters:['Исследование кластеров','Структурные сообщества сети · Откройте внутренние связи'],ranking:['Все узлы','Рассчитанный приоритет, роль и объяснение для каждого клиента'],stress:['Устойчивость сети','Сценарий удаления ключевых узлов с воспроизводимым случайным сравнением'],coverage:['Покрытие и ограничения','Границы наблюдений и качество исходных данных'],exports:['Результаты анализа','Воспроизводимые выгрузки из текущего расчёта'],about:['Как устроен анализ','Объяснимые роли · Проверяемые гипотезы · Локальный расчёт']};
- root.innerHTML='<aside class="rail"><div class="brand">'+logo+'</div>'+Object.entries(pages).map(([id,p],i)=>(i===7?'<div class="rail-separator"></div>':'')+'<button class="nav-item '+(id===page?'active':'')+'" aria-label="'+p[0]+'" title="'+p[0]+'" data-action="nav" data-page="'+id+'">'+icon(p[1])+'</button>').join('')+'<div class="rail-bottom"><button class="nav-item" aria-label="Тактильный отклик" title="Тактильный отклик" data-action="haptics">'+icon('activity')+'</button><button class="nav-item" aria-label="Выйти" title="Выйти" data-action="logout"><span class="avatar">'+esc(A.email.slice(0,2).toUpperCase())+'</span></button></div></aside><main class="main"><header class="topbar"><div>'+(page==='overview'?'<div class="eyebrow"><span class="dot"></span> FINANCIAL INTELLIGENCE</div>':'')+'<h1>'+titles[page][0]+'</h1><div class="subtitle">'+titles[page][1]+'</div></div><div class="tools">'+(page==='overview'?'<span class="pill date-pill">'+icon('calendar')+' Июль 2026</span><span class="pill status"><span class="dot"></span> Расчёт готов</span><button class="btn" data-action="run">'+icon('play')+' Запустить анализ</button><button class="btn gold" data-action="nav" data-page="exports">'+icon('download')+' Экспорт</button>':page==='network'?'<div class="tabs">'+[['graph','Граф'],['flow','Потоки'],['clusters','Кластеры']].map(([id,title])=>'<button class="'+(id===networkTab?'active':'')+'" data-action="network-tab" data-tab="'+id+'">'+title+'</button>').join('')+'</div>':'<span class="pill status"><span class="dot"></span> '+(A.auth_mode==='supabase'?'Supabase':'Локально')+' · '+esc(A.email.split('@')[0])+'</span>')+'</div></header><div id="content" class="page-content"></div><footer class="footer"><span>JUNIOR SYNDICATE <span style="color:#38435b"> / </span> MONEYGRAPH INTELLIGENCE</span><span>Роль — гипотеза для проверки. Приоритет — не вероятность виновности.</span><span class="status"><span class="dot"></span> Только предоставленные данные</span></footer></main>';
+ const titles={overview:['Qadam','Реконструкция финансовой сети и приоритет проверок'],network:['Анализ сети','Направление потоков · Связи клиентов · Топология сообществ'],investigations:['Приоритет проверок','Очередь аналитика · Ранжирование по рассчитанной значимости'],clusters:['Исследование кластеров','Структурные сообщества сети · Откройте внутренние связи'],ranking:['Все узлы','Рассчитанный приоритет, роль и объяснение для каждого клиента'],stress:['Устойчивость сети','Сценарий удаления ключевых узлов с воспроизводимым случайным сравнением'],coverage:['Покрытие и ограничения','Границы наблюдений и качество исходных данных'],exports:['Результаты анализа','Воспроизводимые выгрузки из текущего расчёта'],about:['Как устроен анализ','Объяснимые роли · Проверяемые гипотезы · Локальный расчёт']};
+ root.innerHTML='<aside class="rail"><div class="brand">'+logo+'</div>'+Object.entries(pages).map(([id,p],i)=>(i===7?'<div class="rail-separator"></div>':'')+'<button class="nav-item '+(id===page?'active':'')+'" aria-label="'+p[0]+'" title="'+p[0]+'" data-action="nav" data-page="'+id+'">'+icon(p[1])+'</button>').join('')+'<div class="rail-bottom"><button class="nav-item" aria-label="Тактильный отклик" title="Тактильный отклик" data-action="haptics">'+icon('activity')+'</button><button class="nav-item" aria-label="Выйти" title="Выйти" data-action="logout"><span class="avatar">'+esc(A.email.slice(0,2).toUpperCase())+'</span></button></div></aside><main class="main"><header class="topbar"><div>'+(page==='overview'?'<div class="eyebrow"><span class="dot"></span> FINANCIAL INTELLIGENCE</div>':'')+'<h1>'+titles[page][0]+'</h1><div class="subtitle">'+titles[page][1]+'</div></div><div class="tools">'+(page==='overview'?'<span class="pill date-pill">'+icon('calendar')+' Июль 2026</span><span class="pill status"><span class="dot"></span> Расчёт готов</span><button class="btn" data-action="run">'+icon('play')+' Запустить анализ</button><button class="btn gold" data-action="nav" data-page="exports">'+icon('download')+' Экспорт</button>':page==='network'?'<div class="tabs">'+[['graph','Граф'],['flow','Потоки'],['clusters','Кластеры']].map(([id,title])=>'<button class="'+(id===networkTab?'active':'')+'" data-action="network-tab" data-tab="'+id+'">'+title+'</button>').join('')+'</div>':'<span class="pill status"><span class="dot"></span> '+(A.auth_mode==='supabase'?'Supabase':'Локально')+' · '+esc(A.email.split('@')[0])+'</span>')+'</div></header><div id="content" class="page-content"></div><footer class="footer"><span>JUNIOR SYNDICATE <span style="color:#38435b"> / </span> QADAM</span><span>Роль — гипотеза для проверки. Приоритет — не вероятность виновности.</span><span class="status"><span class="dot"></span> Только предоставленные данные</span></footer></main>';
  if(page==='overview') renderOverview();
  else if(page==='network') renderNetwork();
  else if(page==='investigations'||page==='ranking') renderRanking();
@@ -215,7 +219,7 @@ function drawGraph() {
   el.addEventListener('click',()=>selectNode(n.gid,false));
   el.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();selectNode(n.gid,false);}});
  });
- svg.addEventListener('click',e=>{if(!moved&&!e.target.closest('.node')){selected=null;card=null;highlight(null);renderCard();}});
+ svg.addEventListener('click',e=>{if(!moved&&!e.target.closest('.node')){selected=null;card=null;ai=null;highlight(null);renderCard();}});
  highlight(selected);
 }
 function highlight(gid) {
@@ -227,22 +231,31 @@ function highlight(gid) {
 }
 function selectNode(gid,navigate=true) {
  if(!byId.has(gid))return;
- tactile();selected=gid;card=null;
+ tactile();selected=gid;card=null;ai=null;
  if(navigate){page='network';networkTab='graph';mode='ego';render();}
  else{highlight(gid);renderCard();}
  document.querySelector('#search-results')?.replaceChildren();
  send('select',{gid});
 }
+function renderAi() {
+ const state=ai?.gid===selected?ai:null;
+ const waiting=!!state?.loading;
+ const result=state?.result;
+ return '<section class="ai-explanation"><div class="label">ИИ · Объяснение узла</div><p class="small muted">Краткое пояснение рассчитанных признаков. Роль и приоритет определяет алгоритм.</p><button class="btn gold" data-action="explain" '+(!A.ai_enabled||!card||waiting?'disabled':'')+'>'+icon('info')+' '+(waiting?'Готовим пояснение…':result?'Объяснить ещё раз':'Объяснить узел')+'</button>'+
+ (!A.ai_enabled?'<p class="small muted">ИИ не подключён. Владелец может настроить локальный .env.</p>':'<p class="small muted">По нажатию OpenAI получит метрики выбранного GID и до 5 крупнейших связей каждого направления. Без сырых транзакций.</p>')+
+ '<div aria-live="polite">'+(state?.error?'<p class="ai-error" role="alert">'+esc(state.error)+'</p>':'')+
+ (result?'<div class="ai-result"><p>'+esc(result.summary)+'</p><h3>Основания</h3><ul>'+result.reasons.map(text=>'<li>'+esc(text)+'</li>').join('')+'</ul><h3>Ограничения</h3><ul>'+result.limitations.map(text=>'<li>'+esc(text)+'</li>').join('')+'</ul><p class="small muted">Текст ИИ требует сверки с метриками. Это гипотеза для проверки, не вывод о нарушении.</p></div>':'')+'</div></section>';
+}
 function renderCard() {
  const el=document.querySelector('#node-card');if(!el)return;
  if(!selected){el.innerHTML='<div class="empty-card"><div class="empty-icon">'+icon('search')+'</div><h3>Начните с одного узла</h3><p>Выберите клиента на графе или найдите GID, чтобы увидеть его потоки и обоснование роли.</p><div class="small muted" style="margin-top:26px">Наведите → изучите · Нажмите → откройте</div></div>';return;}
  const n=byId.get(selected);
- el.innerHTML='<div class="card-content"><div class="between"><span class="eyebrow">КАРТОЧКА КЛИЕНТА</span><button class="text-btn" data-action="clear">'+icon('close')+'</button></div><h3 class="card-id mono">GID '+selected+'</h3>'+badge(n)+'<div class="between"><span class="label">Приоритет · 0–1</span><strong class="mono">'+score(n.priority_score)+'</strong></div><div class="progress" style="--role:'+D.colors[n.role]+';margin-top:9px"><i style="width:'+n.priority_score*100+'%"></i></div><div class="divider"></div><div class="kv"><span>Обоснованность роли</span><b>'+score(n.role_score)+'</b></div><div class="kv"><span>Кластер / глубина</span><b>#'+n.cluster_id+' / '+n.depth+'</b></div><div class="kv"><span>Плательщики / получатели</span><b>'+n.in_degree+' / '+n.out_degree+'</b></div><div class="kv"><span>Входящий поток</span><b>'+money(n.sum_in)+'</b></div><div class="kv"><span>Исходящий поток</span><b>'+money(n.sum_out)+'</b></div><div class="divider"></div><span class="label">Почему этот узел</span><p class="evidence">'+esc(n.evidence)+'</p>'+(n.is_boundary_node?'<div class="notice" style="padding:12px;font-size:11px;margin:12px 0">Граница depth=4. Дальнейший выход неизвестен.</div>':'')+(n.is_seed?'<p class="small muted" style="margin-bottom:14px">Seed: входящие потоки наблюдаются не полностью.</p>':'')+'<button class="btn gold" style="width:100%" data-action="dossier" '+(!card?'disabled':'')+'>'+icon('target')+' '+(card?'Полное обоснование':'Загружаем обоснование…')+'</button><button class="btn ghost" style="width:100%;margin-top:9px" data-action="neighbors">Все связи клиента '+icon('arrow')+'</button></div>';
+ el.innerHTML='<div class="card-content"><div class="between"><span class="eyebrow">КАРТОЧКА КЛИЕНТА</span><button class="text-btn" data-action="clear">'+icon('close')+'</button></div><h3 class="card-id mono">GID '+selected+'</h3>'+badge(n)+'<div class="between"><span class="label">Приоритет · 0–1</span><strong class="mono">'+score(n.priority_score)+'</strong></div><div class="progress" style="--role:'+D.colors[n.role]+';margin-top:9px"><i style="width:'+n.priority_score*100+'%"></i></div><div class="divider"></div><div class="kv"><span>Обоснованность роли</span><b>'+score(n.role_score)+'</b></div><div class="kv"><span>Кластер / глубина</span><b>#'+n.cluster_id+' / '+n.depth+'</b></div><div class="kv"><span>Плательщики / получатели</span><b>'+n.in_degree+' / '+n.out_degree+'</b></div><div class="kv"><span>Входящий поток</span><b>'+money(n.sum_in)+'</b></div><div class="kv"><span>Исходящий поток</span><b>'+money(n.sum_out)+'</b></div><div class="divider"></div><span class="label">Почему этот узел</span><p class="evidence">'+esc(n.evidence)+'</p>'+(n.is_boundary_node?'<div class="notice" style="padding:12px;font-size:11px;margin:12px 0">Граница depth=4. Дальнейший выход неизвестен.</div>':'')+(n.is_seed?'<p class="small muted" style="margin-bottom:14px">Seed: входящие потоки наблюдаются не полностью.</p>':'')+'<button class="btn gold" style="width:100%" data-action="dossier" '+(!card?'disabled':'')+'>'+icon('target')+' '+(card?'Полное обоснование':'Загружаем обоснование…')+'</button><button class="btn ghost" style="width:100%;margin-top:9px" data-action="neighbors">Все связи клиента '+icon('arrow')+'</button>'+renderAi()+'</div>';
 }
 function openDossier() {
  if(!card)return;
  const factors=(items)=>items.map(f=>'<div class="factor"><div class="kv"><span>'+esc(f.label)+'</span><b class="mono">'+score(f.contribution)+'</b></div><div class="progress"><i style="width:'+Math.min(100,f.contribution*100)+'%"></i></div></div>').join('');
- document.querySelector('#modal').innerHTML='<div class="modal-backdrop"><section class="modal-dialog" id="dossier-modal" role="dialog" aria-modal="true" aria-label="Обоснование роли"><div class="between"><div><div class="eyebrow">ПРОВЕРЯЕМАЯ ГИПОТЕЗА</div><h2 class="mono" style="margin-top:12px">GID '+selected+'</h2></div><button class="btn tiny" aria-label="Закрыть" data-action="close-modal">'+icon('close')+'</button></div><p class="muted" style="margin-top:18px">'+esc(card.evidence)+'</p><div class="dossier-grid"><div><h3>Вклад в приоритет</h3>'+factors(card.priority_factors)+'</div><div><h3>Факторы роли</h3>'+factors(card.role_factors)+'</div></div><div class="notice">'+icon('info')+'<div><strong>Границы интерпретации</strong>'+card.limitations.map(t=>'<p style="margin-top:8px">'+esc(t)+'</p>').join('')+'</div></div><div class="dossier-grid">'+['in','out'].map(dir=>'<div><h3>'+(dir==='in'?'От кого поступили':'Кому отправлены')+'</h3>'+card[dir].slice(0,20).map(e=>'<div class="kv"><button class="text-btn mono" style="font-size:10px" data-action="modal-node" data-gid="'+e.gid+'">'+e.gid+'</button><b>'+shortMoney(e.sum_kzt)+'</b></div>').join('')+(!card[dir].length?'<p class="small muted" style="margin-top:12px">Связей в выборке нет.</p>':'')+(card[dir].length>20?'<p class="small muted">Первые 20 из '+card[dir].length+'. Все связи доступны на графе.</p>':'')+'</div>').join('')+'</div></section></div>';
+ document.querySelector('#modal').innerHTML='<div class="modal-backdrop"><section class="modal-dialog" id="dossier-modal" role="dialog" aria-modal="true" aria-label="Обоснование роли"><div class="between"><div><div class="eyebrow">ПРОВЕРЯЕМАЯ ГИПОТЕЗА</div><h2 class="mono" style="margin-top:12px">GID '+selected+'</h2></div><button class="btn tiny" aria-label="Закрыть" data-action="close-modal">'+icon('close')+'</button></div><p class="muted" style="margin-top:18px">'+esc(card.evidence)+'</p><div class="dossier-grid"><div><h3>Вклад в приоритет</h3>'+factors(card.priority_factors)+'</div><div><h3>Факторы роли</h3>'+factors(card.role_factors)+'</div></div><div class="notice">'+icon('info')+'<div><strong>Границы интерпретации</strong>'+card.limitations.map(t=>'<p style="margin-top:8px">'+esc(t)+'</p>').join('')+'</div></div><div class="dossier-grid">'+['in','out'].map(dir=>'<div><h3>'+(dir==='in'?'От кого поступили':'Кому отправлены')+'</h3>'+card[dir].slice(0,20).map(e=>'<div class="kv"><button class="text-btn mono" style="font-size:10px" data-action="modal-node" data-gid="'+e.gid+'">'+e.gid+'</button><b>'+shortMoney(e.sum_kzt)+'</b></div>').join('')+(!card[dir].length?'<p class="small muted" style="margin-top:12px">Связей в выборке нет.</p>':'')+(card[dir].length>20?'<p class="small muted">Первые 20 из '+card[dir].length+'. Все связи доступны на графе.</p>':'')+'</div>').join('')+'</div>'+renderAi()+'</section></div>';
  focusModal();
 }
 function openRecovery(code) {
@@ -313,8 +326,13 @@ document.addEventListener('click',e=>{
  else if(['google','logout','run'].includes(a))send(a);
  else if(a==='export')send('export',{filename:b.dataset.file});
  else if(a==='open')selectNode(b.dataset.gid);
- else if(a==='clear'){selected=null;card=null;highlight(null);renderCard();}
+ else if(a==='clear'){selected=null;card=null;ai=null;highlight(null);renderCard();}
  else if(a==='neighbors'){page='network';networkTab='graph';mode='ego';render();}
+ else if(a==='explain'){
+  if(!selected||!card||!A.ai_enabled||ai?.loading)return;
+  ai={gid:selected,loading:true,result:null,error:''};
+  send('explain',{gid:selected});renderCard();if(document.querySelector('#dossier-modal'))openDossier();
+ }
  else if(a==='dossier')openDossier();
  else if(a==='close-modal')document.querySelector('#modal').innerHTML='';
  else if(a==='modal-node'){document.querySelector('#modal').innerHTML='';selectNode(b.dataset.gid);}
@@ -335,7 +353,7 @@ document.addEventListener('change',e=>{
 });
 document.addEventListener('keydown',e=>{
  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();document.querySelector('#search')?.focus();}
- if(e.key==='Escape'){document.querySelector('#modal').innerHTML='';document.querySelector('#search-results')?.replaceChildren();selected=null;card=null;highlight(null);renderCard();}
+ if(e.key==='Escape'){document.querySelector('#modal').innerHTML='';document.querySelector('#search-results')?.replaceChildren();selected=null;card=null;ai=null;highlight(null);renderCard();}
  const dialog=document.querySelector('[role="dialog"]');
  if(dialog&&e.key==='Tab'){const list=[...dialog.querySelectorAll('button,input,[tabindex="0"]')];if(!list.length)return;const first=list[0],last=list.at(-1);if(e.shiftKey&&document.activeElement===first){last.focus();e.preventDefault();}else if(!e.shiftKey&&document.activeElement===last){first.focus();e.preventDefault();}}
 });

@@ -149,7 +149,7 @@ def run(data_dir: str | Path = PROJECT_ROOT / "data", output_dir: str | Path = P
     }
     for name, report in (("run_summary", summary), ("eda_report", eda)):
         (destination / f"{name}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2, default=int, allow_nan=False), encoding="utf-8")
-    report_lines = ["# Результаты Money Graph", "",
+    report_lines = ["# Результаты Qadam", "",
                     f"Узлы: {len(scored)}; рёбра: {len(data.edges)}; транзакции: {len(data.transactions)}.",
                     f"Наблюдаемый оборот: {summary['total_observed_kzt']:,.2f} KZT; время: {summary['runtime_seconds']:.3f} с.", "",
                     "## Роли", "", "| Роль | Узлов |", "|---|---:|"]
@@ -211,7 +211,7 @@ def explain_node(gid: int, output_dir: str | Path = PROJECT_ROOT / "output", fea
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Money Graph: parquet → roles, clusters, priority")
+    parser = argparse.ArgumentParser(description="Qadam: parquet → roles, clusters, priority")
     parser.add_argument("--data", type=Path, default=PROJECT_ROOT / "data")
     parser.add_argument("--out", type=Path, default=PROJECT_ROOT / "output")
     parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "config/scoring.yaml")
